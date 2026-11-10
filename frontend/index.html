@@ -21,6 +21,14 @@
     #vehicleModeBtn { background: #16a34a; color: white; }
     #vehicleModeBtn.active { background: #15803d; outline: 2px solid #86efac; }
     #status { color: #cbd5e1; font-size: 13px; }
+    #actionMsg {
+      position: absolute; top: 64px; left: 50%; transform: translateX(-50%);
+      z-index: 1000; padding: 8px 16px; border-radius: 6px; font-size: 14px;
+      color: white; box-shadow: 0 2px 8px rgba(0,0,0,0.3); display: none;
+    }
+    #actionMsg.info { background: #2563eb; display: block; }
+    #actionMsg.success { background: #16a34a; display: block; }
+    #actionMsg.error { background: #dc2626; display: block; }
   </style>
 </head>
 <body>
@@ -30,6 +38,7 @@
     <span id="status"></span>
     <h1>SkyLane</h1>
   </div>
+  <div id="actionMsg"></div>
   <div id="map"></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

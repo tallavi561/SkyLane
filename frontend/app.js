@@ -12,14 +12,37 @@ const markers = new Map(); // vehicleId -> L.Marker
 const newFlightBtn = document.getElementById('newFlightBtn');
 const vehicleModeBtn = document.getElementById('vehicleModeBtn');
 const statusEl = document.getElementById('status');
+const actionMsgEl = document.getElementById('actionMsg');
 
 let awaitingDestinationClick = false;
 let vehicleModeActive = false;
 let watchId = null;
 let gpsIntervalId = null;
+let actionMsgTimeoutId = null;
 
 function setStatus(text) {
   statusEl.textContent = text;
+}
+
+// Action feedback (armed prompt, flight created/rejected) is shown separately
+// from the ambient vehicle count, which refreshes every POLL_MS and would
+// otherwise overwrite it before it can be read.
+function showActionMessage(text, type = 'info', durationMs = 3500) {
+  actionMsgEl.textContent = text;
+  actionMsgEl.className = type;
+  if (actionMsgTimeoutId !== null) clearTimeout(actionMsgTimeoutId);
+  if (durationMs > 0) {
+    actionMsgTimeoutId = setTimeout(() => {
+      actionMsgEl.className = '';
+      actionMsgEl.textContent = '';
+    }, durationMs);
+  }
+}
+
+function clearActionMessage() {
+  if (actionMsgTimeoutId !== null) clearTimeout(actionMsgTimeoutId);
+  actionMsgEl.className = '';
+  actionMsgEl.textContent = '';
 }
 
 function altitudeColor(altitude) {
@@ -79,7 +102,11 @@ pollVehicles();
 newFlightBtn.addEventListener('click', () => {
   awaitingDestinationClick = !awaitingDestinationClick;
   newFlightBtn.classList.toggle('active', awaitingDestinationClick);
-  setStatus(awaitingDestinationClick ? 'לחץ על נקודה במפה לקביעת יעד' : '');
+  if (awaitingDestinationClick) {
+    showActionMessage('לחץ על נקודה במפה לקביעת יעד', 'info', 0);
+  } else {
+    clearActionMessage();
+  }
 });
 
 map.on('click', async (e) => {
@@ -96,13 +123,13 @@ map.on('click', async (e) => {
     });
     const body = await res.json();
     if (!res.ok) {
-      setStatus(`טיסה נדחתה: ${body.error}`);
+      showActionMessage(`טיסה נדחתה: ${body.error}`, 'error');
       return;
     }
-    setStatus(`טיסה חדשה נוצרה: ${body.id}`);
+    showActionMessage(`טיסה חדשה נוצרה: ${body.id}`, 'success');
     pollVehicles();
   } catch (err) {
-    setStatus('שגיאה ביצירת טיסה');
+    showActionMessage('שגיאה ביצירת טיסה - אין חיבור לשרת', 'error');
   }
 });
 
@@ -134,23 +161,23 @@ vehicleModeBtn.addEventListener('click', () => {
 
   if (vehicleModeActive) {
     if (!navigator.geolocation) {
-      setStatus('הדפדפן לא תומך ב-GPS');
+      showActionMessage('הדפדפן לא תומך ב-GPS', 'error');
       vehicleModeActive = false;
       vehicleModeBtn.classList.remove('active');
       return;
     }
-    watchId = navigator.geolocation.watchPosition(reportPosition, () => setStatus('שגיאת GPS'), {
+    watchId = navigator.geolocation.watchPosition(reportPosition, () => showActionMessage('שגיאת GPS', 'error'), {
       enableHighAccuracy: true,
     });
     gpsIntervalId = setInterval(() => {
       navigator.geolocation.getCurrentPosition(reportPosition);
     }, GPS_REPORT_MS);
-    setStatus(`משדר מיקום בתור ${getVehicleId()}`);
+    showActionMessage(`משדר מיקום בתור ${getVehicleId()}`, 'success', 0);
   } else {
     if (watchId !== null) navigator.geolocation.clearWatch(watchId);
     if (gpsIntervalId !== null) clearInterval(gpsIntervalId);
     watchId = null;
     gpsIntervalId = null;
-    setStatus('');
+    clearActionMessage();
   }
 });
