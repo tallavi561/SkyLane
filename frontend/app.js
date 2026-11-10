@@ -1,33 +1,50 @@
 const ISRAEL_CENTER = [31.8, 34.9];
 const POLL_MS = 1500;
-const GPS_REPORT_MS = 3000;
 
 const map = L.map('map').setView(ISRAEL_CENTER, 8);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors',
 }).addTo(map);
 
-const markers = new Map(); // vehicleId -> L.Marker
-const routeLayers = new Map(); // vehicleId -> { line, decorator }
+const STATUS_COLOR = {
+  idle: '#94a3b8',
+  to_pickup: '#2563eb',
+  awaiting_pickup: '#f97316',
+  to_destination: '#7c3aed',
+  awaiting_delivery: '#eab308',
+  returning_home: '#14b8a6',
+};
 
-const newFlightBtn = document.getElementById('newFlightBtn');
-const vehicleModeBtn = document.getElementById('vehicleModeBtn');
+const STATUS_LABEL = {
+  idle: 'פנוי',
+  to_pickup: 'בדרך לאיסוף',
+  awaiting_pickup: 'ממתין לאישור איסוף',
+  to_destination: 'בדרך ליעד',
+  awaiting_delivery: 'ממתין לאישור מסירה',
+  returning_home: 'חוזר לבסיס',
+};
+
+const droneMarkers = new Map(); // droneId -> L.CircleMarker
+const routeLines = new Map(); // droneId -> { line, arrowMarker }
+
+const orderBtn = document.getElementById('orderBtn');
 const statusEl = document.getElementById('status');
 const actionMsgEl = document.getElementById('actionMsg');
 
-let awaitingDestinationClick = false;
-let vehicleModeActive = false;
-let watchId = null;
-let gpsIntervalId = null;
+const composerPanel = document.getElementById('composerPanel');
+const pickSourceBtn = document.getElementById('pickSourceBtn');
+const pickDestinationBtn = document.getElementById('pickDestinationBtn');
+const cancelOrderBtn = document.getElementById('cancelOrderBtn');
+
+const orderPanel = document.getElementById('orderPanel');
+const orderTitleEl = document.getElementById('orderTitle');
+const orderStatusTextEl = document.getElementById('orderStatusText');
+const orderActionBtn = document.getElementById('orderActionBtn');
+
 let actionMsgTimeoutId = null;
 
-function setStatus(text) {
-  statusEl.textContent = text;
-}
-
-// Action feedback (armed prompt, flight created/rejected) is shown separately
-// from the ambient vehicle count, which refreshes every POLL_MS and would
-// otherwise overwrite it before it can be read.
+// --- Action feedback banner (separate from the ambient status line, so a
+// background poll never overwrites a message before it can be read) ---
 function showActionMessage(text, type = 'info', durationMs = 3500) {
   actionMsgEl.textContent = text;
   actionMsgEl.className = type;
@@ -40,210 +57,322 @@ function showActionMessage(text, type = 'info', durationMs = 3500) {
   }
 }
 
+function setStatus(text) {
+  statusEl.textContent = text;
+}
+
+// --- Order composer flow: "הזמן משלוח" -> pick source -> pick destination ---
+let composerOpen = false;
+let pickingMode = null; // null | 'source' | 'destination'
+let pendingSource = null;
+let pendingDestination = null;
+let sourceMarker = null;
+let destinationMarker = null;
+let activeOrder = null; // { id, droneId, status }
+
+function resetComposer() {
+  pickingMode = null;
+  pendingSource = null;
+  pendingDestination = null;
+  pickSourceBtn.classList.remove('chosen', 'active');
+  pickDestinationBtn.classList.remove('chosen', 'active');
+  pickDestinationBtn.disabled = true;
+  if (sourceMarker) {
+    map.removeLayer(sourceMarker);
+    sourceMarker = null;
+  }
+  if (destinationMarker) {
+    map.removeLayer(destinationMarker);
+    destinationMarker = null;
+  }
+}
+
+function openComposer() {
+  if (activeOrder) {
+    showActionMessage('יש כבר הזמנה פעילה - סיים אותה לפני שתפתח הזמנה חדשה', 'error');
+    return;
+  }
+  composerOpen = true;
+  composerPanel.classList.add('open');
+  resetComposer();
+  orderBtn.classList.add('active');
+}
+
+function closeComposer() {
+  composerOpen = false;
+  composerPanel.classList.remove('open');
+  resetComposer();
+  orderBtn.classList.remove('active');
+}
+
+orderBtn.addEventListener('click', () => {
+  if (composerOpen) closeComposer();
+  else openComposer();
+});
+
+cancelOrderBtn.addEventListener('click', closeComposer);
+
+pickSourceBtn.addEventListener('click', () => {
+  pickingMode = 'source';
+  pickSourceBtn.classList.add('active');
+  pickDestinationBtn.classList.remove('active');
+  showActionMessage('לחץ על נקודת ההתחלה במפה', 'info', 0);
+});
+
+pickDestinationBtn.addEventListener('click', () => {
+  if (pickDestinationBtn.disabled) return;
+  pickingMode = 'destination';
+  pickDestinationBtn.classList.add('active');
+  pickSourceBtn.classList.remove('active');
+  showActionMessage('לחץ על נקודת היעד במפה', 'info', 0);
+});
+
+map.on('click', async (e) => {
+  if (!pickingMode) return;
+  const point = { lat: e.latlng.lat, lng: e.latlng.lng };
+
+  if (pickingMode === 'source') {
+    pendingSource = point;
+    if (sourceMarker) map.removeLayer(sourceMarker);
+    sourceMarker = L.marker([point.lat, point.lng], {
+      icon: L.divIcon({ className: '', html: '<div style="font-size:22px;">🟢</div>', iconSize: [22, 22], iconAnchor: [11, 11] }),
+    }).addTo(map);
+    pickSourceBtn.classList.add('chosen');
+    pickSourceBtn.classList.remove('active');
+    pickDestinationBtn.disabled = false;
+    pickingMode = null;
+    clearActionMessage();
+  } else if (pickingMode === 'destination') {
+    pendingDestination = point;
+    if (destinationMarker) map.removeLayer(destinationMarker);
+    destinationMarker = L.marker([point.lat, point.lng], {
+      icon: L.divIcon({ className: '', html: '<div style="font-size:22px;">🔴</div>', iconSize: [22, 22], iconAnchor: [11, 11] }),
+    }).addTo(map);
+    pickDestinationBtn.classList.add('chosen');
+    pickDestinationBtn.classList.remove('active');
+    pickingMode = null;
+    clearActionMessage();
+    await submitOrder();
+  }
+});
+
 function clearActionMessage() {
   if (actionMsgTimeoutId !== null) clearTimeout(actionMsgTimeoutId);
   actionMsgEl.className = '';
   actionMsgEl.textContent = '';
 }
 
-function altitudeColor(altitude) {
-  if (altitude <= 100) return '#22c55e';
-  if (altitude <= 200) return '#eab308';
-  if (altitude <= 300) return '#f97316';
-  return '#ef4444';
+async function submitOrder() {
+  try {
+    const res = await fetch('/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: pendingSource, destination: pendingDestination }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showActionMessage(`ההזמנה נדחתה: ${body.error}`, 'error', 5000);
+      closeComposer();
+      return;
+    }
+
+    activeOrder = { id: body.id, droneId: body.droneId, status: body.status };
+    closeComposer();
+    showOrderPanel();
+    showActionMessage(`הזמנה ${body.id} נוצרה - ${body.droneId} בדרך לאיסוף`, 'success');
+  } catch (err) {
+    showActionMessage('שגיאה ביצירת הזמנה - אין חיבור לשרת', 'error', 5000);
+    closeComposer();
+  }
 }
 
-function upsertMarker(vehicle) {
-  const popupText = `${vehicle.id}<br/>גובה: ${vehicle.altitude}מ'<br/>מהירות: ${vehicle.speed} קמ"ש<br/>מקור: ${vehicle.source}`;
-  let marker = markers.get(vehicle.id);
+function showOrderPanel() {
+  orderPanel.classList.add('open');
+  orderTitleEl.textContent = activeOrder.id;
+  orderActionBtn.style.display = 'none';
+  updateOrderPanelText('to_pickup');
+}
+
+function updateOrderPanelText(droneStatus) {
+  const texts = {
+    to_pickup: 'הרחפן בדרך לנקודת האיסוף...',
+    awaiting_pickup: 'הרחפן הגיע לנקודת האיסוף.',
+    to_destination: 'הרחפן בדרך ליעד...',
+    awaiting_delivery: 'הרחפן הגיע ליעד.',
+    returning_home: 'ההזמנה הושלמה! הרחפן חוזר לבסיס.',
+  };
+  orderStatusTextEl.textContent = texts[droneStatus] || '';
+}
+
+let orderActionInFlight = false;
+
+async function confirmPickup() {
+  if (orderActionInFlight || !activeOrder) return;
+  orderActionInFlight = true;
+  try {
+    const res = await fetch(`/orders/${activeOrder.id}/confirm-pickup`, { method: 'POST' });
+    if (!res.ok) {
+      const body = await res.json();
+      showActionMessage(`שגיאה באישור איסוף: ${body.error}`, 'error');
+      return;
+    }
+    activeOrder.status = 'in_transit';
+    orderActionBtn.style.display = 'none';
+    showActionMessage('איסוף אושר - הרחפן בדרך ליעד', 'success');
+  } catch (err) {
+    showActionMessage('שגיאה באישור איסוף - אין חיבור לשרת', 'error');
+  } finally {
+    orderActionInFlight = false;
+  }
+}
+
+async function confirmDelivery() {
+  if (orderActionInFlight || !activeOrder) return;
+  orderActionInFlight = true;
+  try {
+    const res = await fetch(`/orders/${activeOrder.id}/confirm-delivery`, { method: 'POST' });
+    if (!res.ok) {
+      const body = await res.json();
+      showActionMessage(`שגיאה באישור מסירה: ${body.error}`, 'error');
+      return;
+    }
+    activeOrder.status = 'completed';
+    orderActionBtn.style.display = 'none';
+    showActionMessage('מסירה אושרה - הרחפן חוזר לבסיס', 'success');
+  } catch (err) {
+    showActionMessage('שגיאה באישור מסירה - אין חיבור לשרת', 'error');
+  } finally {
+    orderActionInFlight = false;
+  }
+}
+
+function closeOrderPanel() {
+  orderPanel.classList.remove('open');
+  activeOrder = null;
+  if (sourceMarker) {
+    map.removeLayer(sourceMarker);
+    sourceMarker = null;
+  }
+  if (destinationMarker) {
+    map.removeLayer(destinationMarker);
+    destinationMarker = null;
+  }
+}
+
+// Reacts to the assigned drone's live status on every poll, since that's the
+// only place that knows when the drone has actually arrived.
+function reactToDroneStatus(drone) {
+  if (!activeOrder || drone.id !== activeOrder.droneId) return;
+
+  updateOrderPanelText(drone.status);
+
+  if (drone.status === 'awaiting_pickup' && activeOrder.status === 'assigned') {
+    orderActionBtn.textContent = 'אשר איסוף';
+    orderActionBtn.onclick = confirmPickup;
+    orderActionBtn.style.display = 'block';
+  } else if (drone.status === 'to_destination') {
+    orderActionBtn.style.display = 'none';
+  } else if (drone.status === 'awaiting_delivery' && activeOrder.status === 'in_transit') {
+    orderActionBtn.textContent = 'אשר מסירה';
+    orderActionBtn.onclick = confirmDelivery;
+    orderActionBtn.style.display = 'block';
+  } else if (drone.status === 'returning_home' || drone.status === 'idle') {
+    setTimeout(closeOrderPanel, 2500);
+  }
+}
+
+// --- Map rendering: drone markers + in-place route lines (updated, not
+// recreated, every poll - recreating them each tick is what caused the
+// flicker/behavior bugs in the previous version) ---
+function upsertDroneMarker(drone) {
+  const color = STATUS_COLOR[drone.status] || '#64748b';
+  const popupText = `${drone.id}<br/>סטטוס: ${STATUS_LABEL[drone.status] || drone.status}${drone.orderId ? `<br/>הזמנה: ${drone.orderId}` : ''}`;
+  let marker = droneMarkers.get(drone.id);
   if (!marker) {
-    marker = L.circleMarker([vehicle.lat, vehicle.lng], {
-      radius: 7,
-      color: altitudeColor(vehicle.altitude),
-      fillColor: altitudeColor(vehicle.altitude),
+    marker = L.circleMarker([drone.lat, drone.lng], {
+      radius: 8,
+      color,
+      fillColor: color,
       fillOpacity: 0.85,
     }).addTo(map);
     marker.bindPopup(popupText);
-    markers.set(vehicle.id, marker);
+    droneMarkers.set(drone.id, marker);
   } else {
-    marker.setLatLng([vehicle.lat, vehicle.lng]);
-    marker.setStyle({ color: altitudeColor(vehicle.altitude), fillColor: altitudeColor(vehicle.altitude) });
+    marker.setLatLng([drone.lat, drone.lng]);
+    marker.setStyle({ color, fillColor: color });
     marker.setPopupContent(popupText);
   }
 }
 
-function pruneMarkers(currentIds) {
-  for (const [id, marker] of markers) {
-    if (!currentIds.has(id)) {
-      map.removeLayer(marker);
-      markers.delete(id);
-    }
-  }
+function bearingDeg(from, to) {
+  const dLat = to.lat - from.lat;
+  const dLng = to.lng - from.lng;
+  return (Math.atan2(dLng, dLat) * 180) / Math.PI;
 }
 
-// Dashed route line from a vehicle's current position to its destination,
-// with an arrowhead showing the direction of travel. Vehicles with no known
-// destination (e.g. a phone that only reports GPS) get no route drawn.
-function upsertRoute(vehicle) {
-  if (!vehicle.to) {
-    removeRoute(vehicle.id);
+function arrowIcon(color, angle) {
+  return L.divIcon({
+    className: 'route-arrow',
+    html: `<div style="transform: rotate(${angle}deg); color: ${color};">▲</div>`,
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
+  });
+}
+
+function upsertRoute(drone) {
+  if (!drone.target) {
+    removeRoute(drone.id);
     return;
   }
 
   const latlngs = [
-    [vehicle.lat, vehicle.lng],
-    [vehicle.to.lat, vehicle.to.lng],
+    [drone.lat, drone.lng],
+    [drone.target.lat, drone.target.lng],
   ];
-  const color = altitudeColor(vehicle.altitude);
-  let entry = routeLayers.get(vehicle.id);
+  const color = STATUS_COLOR[drone.status] || '#64748b';
+  const angle = bearingDeg({ lat: drone.lat, lng: drone.lng }, drone.target);
+  let entry = routeLines.get(drone.id);
 
   if (!entry) {
     const line = L.polyline(latlngs, { color, weight: 2, dashArray: '6,8', opacity: 0.7 }).addTo(map);
-    const decorator = L.polylineDecorator(line, {
-      patterns: [
-        {
-          offset: '100%',
-          repeat: 0,
-          symbol: L.Symbol.arrowHead({
-            pixelSize: 12,
-            polygon: true,
-            pathOptions: { color, fillColor: color, fillOpacity: 1, weight: 0 },
-          }),
-        },
-      ],
+    const arrowMarker = L.marker([drone.target.lat, drone.target.lng], {
+      icon: arrowIcon(color, angle),
+      interactive: false,
     }).addTo(map);
-    routeLayers.set(vehicle.id, { line, decorator });
+    routeLines.set(drone.id, { line, arrowMarker });
   } else {
     entry.line.setLatLngs(latlngs);
     entry.line.setStyle({ color });
-    entry.decorator.setPatterns([
-      {
-        offset: '100%',
-        repeat: 0,
-        symbol: L.Symbol.arrowHead({
-          pixelSize: 12,
-          polygon: true,
-          pathOptions: { color, fillColor: color, fillOpacity: 1, weight: 0 },
-        }),
-      },
-    ]);
+    entry.arrowMarker.setLatLng([drone.target.lat, drone.target.lng]);
+    entry.arrowMarker.setIcon(arrowIcon(color, angle));
   }
 }
 
-function removeRoute(vehicleId) {
-  const entry = routeLayers.get(vehicleId);
+function removeRoute(droneId) {
+  const entry = routeLines.get(droneId);
   if (!entry) return;
-  map.removeLayer(entry.decorator);
   map.removeLayer(entry.line);
-  routeLayers.delete(vehicleId);
+  map.removeLayer(entry.arrowMarker);
+  routeLines.delete(droneId);
 }
 
-function pruneRoutes(currentIds) {
-  for (const id of [...routeLayers.keys()]) {
-    if (!currentIds.has(id)) removeRoute(id);
-  }
-}
-
-async function pollVehicles() {
+async function pollDrones() {
   try {
-    const res = await fetch('/vehicles');
+    const res = await fetch('/drones');
     if (!res.ok) {
-      setStatus(`שגיאה בטעינת רכבים (${res.status})`);
+      setStatus(`שגיאה בטעינת רחפנים (${res.status})`);
       return;
     }
-    const vehicles = await res.json();
-    const ids = new Set(vehicles.map((v) => v.id));
-    vehicles.forEach(upsertMarker);
-    vehicles.forEach(upsertRoute);
-    pruneMarkers(ids);
-    pruneRoutes(ids);
-    setStatus(`${vehicles.length} רכבים באוויר`);
+    const drones = await res.json();
+    drones.forEach(upsertDroneMarker);
+    drones.forEach(upsertRoute);
+    drones.forEach(reactToDroneStatus);
+
+    const busy = drones.filter((d) => d.status !== 'idle').length;
+    setStatus(`${busy} רחפנים בפעולה מתוך ${drones.length}`);
   } catch (err) {
     setStatus('אין חיבור לשרת');
   }
 }
-setInterval(pollVehicles, POLL_MS);
-pollVehicles();
-
-newFlightBtn.addEventListener('click', () => {
-  awaitingDestinationClick = !awaitingDestinationClick;
-  newFlightBtn.classList.toggle('active', awaitingDestinationClick);
-  if (awaitingDestinationClick) {
-    showActionMessage('לחץ על נקודה במפה לקביעת יעד', 'info', 0);
-  } else {
-    clearActionMessage();
-  }
-});
-
-map.on('click', async (e) => {
-  if (!awaitingDestinationClick) return;
-  awaitingDestinationClick = false;
-  newFlightBtn.classList.remove('active');
-
-  const to = { lat: e.latlng.lat, lng: e.latlng.lng };
-  try {
-    const res = await fetch('/flights', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to }),
-    });
-    const body = await res.json();
-    if (!res.ok) {
-      showActionMessage(`טיסה נדחתה: ${body.error}`, 'error');
-      return;
-    }
-    showActionMessage(`טיסה חדשה נוצרה: ${body.id}`, 'success');
-    pollVehicles();
-  } catch (err) {
-    showActionMessage('שגיאה ביצירת טיסה - אין חיבור לשרת', 'error');
-  }
-});
-
-function getVehicleId() {
-  let id = localStorage.getItem('skylane_vehicle_id');
-  if (!id) {
-    id = `PHONE-${Math.random().toString(36).slice(2, 8)}`;
-    localStorage.setItem('skylane_vehicle_id', id);
-  }
-  return id;
-}
-
-async function reportPosition(position) {
-  const { latitude, longitude } = position.coords;
-  try {
-    await fetch('/gps', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vehicleId: getVehicleId(), lat: latitude, lng: longitude }),
-    });
-  } catch (err) {
-    // ignore transient network errors from a moving phone
-  }
-}
-
-vehicleModeBtn.addEventListener('click', () => {
-  vehicleModeActive = !vehicleModeActive;
-  vehicleModeBtn.classList.toggle('active', vehicleModeActive);
-
-  if (vehicleModeActive) {
-    if (!navigator.geolocation) {
-      showActionMessage('הדפדפן לא תומך ב-GPS', 'error');
-      vehicleModeActive = false;
-      vehicleModeBtn.classList.remove('active');
-      return;
-    }
-    watchId = navigator.geolocation.watchPosition(reportPosition, () => showActionMessage('שגיאת GPS', 'error'), {
-      enableHighAccuracy: true,
-    });
-    gpsIntervalId = setInterval(() => {
-      navigator.geolocation.getCurrentPosition(reportPosition);
-    }, GPS_REPORT_MS);
-    showActionMessage(`משדר מיקום בתור ${getVehicleId()}`, 'success', 0);
-  } else {
-    if (watchId !== null) navigator.geolocation.clearWatch(watchId);
-    if (gpsIntervalId !== null) clearInterval(gpsIntervalId);
-    watchId = null;
-    gpsIntervalId = null;
-    clearActionMessage();
-  }
-});
+setInterval(pollDrones, POLL_MS);
+pollDrones();

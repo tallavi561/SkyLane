@@ -5,17 +5,17 @@ set -e
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$root/logs"
 
-for svc in flight-plan-service traffic-service; do
+for svc in drone-fleet-service order-service; do
   if [ ! -d "$root/$svc/node_modules" ]; then
     echo "Installing dependencies in $svc..."
     (cd "$root/$svc" && npm install)
   fi
 done
 
-(cd "$root/flight-plan-service" && npm start > "$root/logs/flight-plan-service.log" 2>&1 &)
-(cd "$root/traffic-service" && npm start > "$root/logs/traffic-service.log" 2>&1 &)
+(cd "$root/drone-fleet-service" && npm start > "$root/logs/drone-fleet-service.log" 2>&1 &)
+(cd "$root/order-service" && npm start > "$root/logs/order-service.log" 2>&1 &)
 
-echo "flight-plan-service -> http://localhost:4001 (logs/flight-plan-service.log)"
-echo "traffic-service     -> http://localhost:4000 (logs/traffic-service.log)"
+echo "drone-fleet-service -> http://localhost:4001 (logs/drone-fleet-service.log)"
+echo "order-service       -> http://localhost:4000 (logs/order-service.log)"
 echo "Open http://localhost:4000 in your browser for the map."
 echo "Stop both with: ./stop.sh"

@@ -16,12 +16,12 @@ function Ensure-Installed($dir) {
     }
 }
 
-Ensure-Installed (Join-Path $root "flight-plan-service")
-Ensure-Installed (Join-Path $root "traffic-service")
+Ensure-Installed (Join-Path $root "drone-fleet-service")
+Ensure-Installed (Join-Path $root "order-service")
 
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\flight-plan-service'; npm start"
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\traffic-service'; npm start"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\drone-fleet-service'; npm start"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\order-service'; npm start"
 
-Write-Host "flight-plan-service -> http://localhost:4001"
-Write-Host "traffic-service     -> http://localhost:4000"
+Write-Host "drone-fleet-service -> http://localhost:4001"
+Write-Host "order-service       -> http://localhost:4000"
 Write-Host "Open http://localhost:4000 in your browser for the map."

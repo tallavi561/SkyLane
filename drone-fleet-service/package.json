@@ -1,5 +1,5 @@
 {
-  "name": "flight-plan-service",
+  "name": "drone-fleet-service",
   "version": "1.0.0",
   "private": true,
   "type": "module",
