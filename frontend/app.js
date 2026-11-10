@@ -8,6 +8,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 }).addTo(map);
 
 const markers = new Map(); // vehicleId -> L.Marker
+const routeLayers = new Map(); // vehicleId -> { line, decorator }
 
 const newFlightBtn = document.getElementById('newFlightBtn');
 const vehicleModeBtn = document.getElementById('vehicleModeBtn');
@@ -80,6 +81,69 @@ function pruneMarkers(currentIds) {
   }
 }
 
+// Dashed route line from a vehicle's current position to its destination,
+// with an arrowhead showing the direction of travel. Vehicles with no known
+// destination (e.g. a phone that only reports GPS) get no route drawn.
+function upsertRoute(vehicle) {
+  if (!vehicle.to) {
+    removeRoute(vehicle.id);
+    return;
+  }
+
+  const latlngs = [
+    [vehicle.lat, vehicle.lng],
+    [vehicle.to.lat, vehicle.to.lng],
+  ];
+  const color = altitudeColor(vehicle.altitude);
+  let entry = routeLayers.get(vehicle.id);
+
+  if (!entry) {
+    const line = L.polyline(latlngs, { color, weight: 2, dashArray: '6,8', opacity: 0.7 }).addTo(map);
+    const decorator = L.polylineDecorator(line, {
+      patterns: [
+        {
+          offset: '100%',
+          repeat: 0,
+          symbol: L.Symbol.arrowHead({
+            pixelSize: 12,
+            polygon: true,
+            pathOptions: { color, fillColor: color, fillOpacity: 1, weight: 0 },
+          }),
+        },
+      ],
+    }).addTo(map);
+    routeLayers.set(vehicle.id, { line, decorator });
+  } else {
+    entry.line.setLatLngs(latlngs);
+    entry.line.setStyle({ color });
+    entry.decorator.setPatterns([
+      {
+        offset: '100%',
+        repeat: 0,
+        symbol: L.Symbol.arrowHead({
+          pixelSize: 12,
+          polygon: true,
+          pathOptions: { color, fillColor: color, fillOpacity: 1, weight: 0 },
+        }),
+      },
+    ]);
+  }
+}
+
+function removeRoute(vehicleId) {
+  const entry = routeLayers.get(vehicleId);
+  if (!entry) return;
+  map.removeLayer(entry.decorator);
+  map.removeLayer(entry.line);
+  routeLayers.delete(vehicleId);
+}
+
+function pruneRoutes(currentIds) {
+  for (const id of [...routeLayers.keys()]) {
+    if (!currentIds.has(id)) removeRoute(id);
+  }
+}
+
 async function pollVehicles() {
   try {
     const res = await fetch('/vehicles');
@@ -90,7 +154,9 @@ async function pollVehicles() {
     const vehicles = await res.json();
     const ids = new Set(vehicles.map((v) => v.id));
     vehicles.forEach(upsertMarker);
+    vehicles.forEach(upsertRoute);
     pruneMarkers(ids);
+    pruneRoutes(ids);
     setStatus(`${vehicles.length} רכבים באוויר`);
   } catch (err) {
     setStatus('אין חיבור לשרת');
