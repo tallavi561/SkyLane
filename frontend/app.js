@@ -1,5 +1,6 @@
 const ISRAEL_CENTER = [31.8, 34.9];
 const POLL_MS = 1500;
+const COMPLETED_VISIBLE_MS = 4000;
 
 const map = L.map('map').setView(ISRAEL_CENTER, 8);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -17,15 +18,16 @@ const STATUS_COLOR = {
 
 const STATUS_LABEL = {
   idle: 'פנוי',
-  to_pickup: 'בדרך לאיסוף',
-  awaiting_pickup: 'ממתין לאישור איסוף',
-  to_destination: 'בדרך ליעד',
-  awaiting_delivery: 'ממתין לאישור מסירה',
-  returning_home: 'חוזר לבסיס',
+  to_pickup: 'הרחפן בדרך לנקודת האיסוף...',
+  awaiting_pickup: 'הרחפן הגיע לנקודת האיסוף.',
+  to_destination: 'הרחפן בדרך ליעד...',
+  awaiting_delivery: 'הרחפן הגיע ליעד.',
+  returning_home: 'נמסר! הרחפן חוזר לבסיס.',
 };
 
 const droneMarkers = new Map(); // droneId -> L.CircleMarker
 const routeLines = new Map(); // droneId -> { line, arrowMarker }
+const completedSeenAt = new Map(); // orderId -> timestamp first seen completed
 
 const orderBtn = document.getElementById('orderBtn');
 const statusEl = document.getElementById('status');
@@ -34,12 +36,13 @@ const actionMsgEl = document.getElementById('actionMsg');
 const composerPanel = document.getElementById('composerPanel');
 const pickSourceBtn = document.getElementById('pickSourceBtn');
 const pickDestinationBtn = document.getElementById('pickDestinationBtn');
+const nameStep = document.getElementById('nameStep');
+const orderNameInput = document.getElementById('orderNameInput');
+const submitOrderBtn = document.getElementById('submitOrderBtn');
 const cancelOrderBtn = document.getElementById('cancelOrderBtn');
 
 const orderPanel = document.getElementById('orderPanel');
-const orderTitleEl = document.getElementById('orderTitle');
-const orderStatusTextEl = document.getElementById('orderStatusText');
-const orderActionBtn = document.getElementById('orderActionBtn');
+const orderListEl = document.getElementById('orderList');
 
 let actionMsgTimeoutId = null;
 
@@ -57,18 +60,23 @@ function showActionMessage(text, type = 'info', durationMs = 3500) {
   }
 }
 
+function clearActionMessage() {
+  if (actionMsgTimeoutId !== null) clearTimeout(actionMsgTimeoutId);
+  actionMsgEl.className = '';
+  actionMsgEl.textContent = '';
+}
+
 function setStatus(text) {
   statusEl.textContent = text;
 }
 
-// --- Order composer flow: "הזמן משלוח" -> pick source -> pick destination ---
+// --- Order composer flow: "הזמן משלוח" -> pick source -> pick destination -> name ---
 let composerOpen = false;
 let pickingMode = null; // null | 'source' | 'destination'
 let pendingSource = null;
 let pendingDestination = null;
 let sourceMarker = null;
 let destinationMarker = null;
-let activeOrder = null; // { id, droneId, status }
 
 function resetComposer() {
   pickingMode = null;
@@ -77,6 +85,8 @@ function resetComposer() {
   pickSourceBtn.classList.remove('chosen', 'active');
   pickDestinationBtn.classList.remove('chosen', 'active');
   pickDestinationBtn.disabled = true;
+  nameStep.style.display = 'none';
+  orderNameInput.value = '';
   if (sourceMarker) {
     map.removeLayer(sourceMarker);
     sourceMarker = null;
@@ -88,10 +98,6 @@ function resetComposer() {
 }
 
 function openComposer() {
-  if (activeOrder) {
-    showActionMessage('יש כבר הזמנה פעילה - סיים אותה לפני שתפתח הזמנה חדשה', 'error');
-    return;
-  }
   composerOpen = true;
   composerPanel.classList.add('open');
   resetComposer();
@@ -127,7 +133,7 @@ pickDestinationBtn.addEventListener('click', () => {
   showActionMessage('לחץ על נקודת היעד במפה', 'info', 0);
 });
 
-map.on('click', async (e) => {
+map.on('click', (e) => {
   if (!pickingMode) return;
   const point = { lat: e.latlng.lat, lng: e.latlng.lng };
 
@@ -152,22 +158,28 @@ map.on('click', async (e) => {
     pickDestinationBtn.classList.remove('active');
     pickingMode = null;
     clearActionMessage();
-    await submitOrder();
+    nameStep.style.display = 'block';
+    orderNameInput.focus();
   }
 });
 
-function clearActionMessage() {
-  if (actionMsgTimeoutId !== null) clearTimeout(actionMsgTimeoutId);
-  actionMsgEl.className = '';
-  actionMsgEl.textContent = '';
-}
+submitOrderBtn.addEventListener('click', submitOrder);
+orderNameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') submitOrder();
+});
 
 async function submitOrder() {
+  const name = orderNameInput.value.trim();
+  if (!name) {
+    showActionMessage('יש להזין שם להזמנה', 'error');
+    return;
+  }
+
   try {
     const res = await fetch('/orders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source: pendingSource, destination: pendingDestination }),
+      body: JSON.stringify({ name, source: pendingSource, destination: pendingDestination }),
     });
     const body = await res.json();
     if (!res.ok) {
@@ -176,117 +188,114 @@ async function submitOrder() {
       return;
     }
 
-    activeOrder = { id: body.id, droneId: body.droneId, status: body.status };
     closeComposer();
-    showOrderPanel();
-    showActionMessage(`הזמנה ${body.id} נוצרה - ${body.droneId} בדרך לאיסוף`, 'success');
+    showActionMessage(`הזמנה "${body.name}" (${body.id}) נוצרה - ${body.droneId} בדרך לאיסוף`, 'success');
   } catch (err) {
     showActionMessage('שגיאה ביצירת הזמנה - אין חיבור לשרת', 'error', 5000);
     closeComposer();
   }
 }
 
-function showOrderPanel() {
-  orderPanel.classList.add('open');
-  orderTitleEl.textContent = activeOrder.id;
-  orderActionBtn.style.display = 'none';
-  updateOrderPanelText('to_pickup');
-}
+// --- Confirm actions: available to anyone viewing the shared order list ---
+const actionInFlight = new Set();
 
-function updateOrderPanelText(droneStatus) {
-  const texts = {
-    to_pickup: 'הרחפן בדרך לנקודת האיסוף...',
-    awaiting_pickup: 'הרחפן הגיע לנקודת האיסוף.',
-    to_destination: 'הרחפן בדרך ליעד...',
-    awaiting_delivery: 'הרחפן הגיע ליעד.',
-    returning_home: 'ההזמנה הושלמה! הרחפן חוזר לבסיס.',
-  };
-  orderStatusTextEl.textContent = texts[droneStatus] || '';
-}
-
-let orderActionInFlight = false;
-
-async function confirmPickup() {
-  if (orderActionInFlight || !activeOrder) return;
-  orderActionInFlight = true;
+async function confirmPickup(orderId) {
+  if (actionInFlight.has(orderId)) return;
+  actionInFlight.add(orderId);
   try {
-    const res = await fetch(`/orders/${activeOrder.id}/confirm-pickup`, { method: 'POST' });
+    const res = await fetch(`/orders/${orderId}/confirm-pickup`, { method: 'POST' });
     if (!res.ok) {
       const body = await res.json();
       showActionMessage(`שגיאה באישור איסוף: ${body.error}`, 'error');
       return;
     }
-    activeOrder.status = 'in_transit';
-    orderActionBtn.style.display = 'none';
     showActionMessage('איסוף אושר - הרחפן בדרך ליעד', 'success');
   } catch (err) {
     showActionMessage('שגיאה באישור איסוף - אין חיבור לשרת', 'error');
   } finally {
-    orderActionInFlight = false;
+    actionInFlight.delete(orderId);
   }
 }
 
-async function confirmDelivery() {
-  if (orderActionInFlight || !activeOrder) return;
-  orderActionInFlight = true;
+async function confirmDelivery(orderId) {
+  if (actionInFlight.has(orderId)) return;
+  actionInFlight.add(orderId);
   try {
-    const res = await fetch(`/orders/${activeOrder.id}/confirm-delivery`, { method: 'POST' });
+    const res = await fetch(`/orders/${orderId}/confirm-delivery`, { method: 'POST' });
     if (!res.ok) {
       const body = await res.json();
       showActionMessage(`שגיאה באישור מסירה: ${body.error}`, 'error');
       return;
     }
-    activeOrder.status = 'completed';
-    orderActionBtn.style.display = 'none';
     showActionMessage('מסירה אושרה - הרחפן חוזר לבסיס', 'success');
   } catch (err) {
     showActionMessage('שגיאה באישור מסירה - אין חיבור לשרת', 'error');
   } finally {
-    orderActionInFlight = false;
+    actionInFlight.delete(orderId);
   }
 }
 
-function closeOrderPanel() {
-  orderPanel.classList.remove('open');
-  activeOrder = null;
-  if (sourceMarker) {
-    map.removeLayer(sourceMarker);
-    sourceMarker = null;
-  }
-  if (destinationMarker) {
-    map.removeLayer(destinationMarker);
-    destinationMarker = null;
-  }
+// An order stays visible to every viewer for a little while after it's
+// completed, then quietly drops off each browser's own list.
+function isOrderVisible(order) {
+  if (order.status !== 'completed') return true;
+  if (!completedSeenAt.has(order.id)) completedSeenAt.set(order.id, Date.now());
+  return Date.now() - completedSeenAt.get(order.id) < COMPLETED_VISIBLE_MS;
 }
 
-// Reacts to the assigned drone's live status on every poll, since that's the
-// only place that knows when the drone has actually arrived.
-function reactToDroneStatus(drone) {
-  if (!activeOrder || drone.id !== activeOrder.droneId) return;
+function renderOrders(orders, dronesById) {
+  const visible = orders.filter(isOrderVisible);
+  orderPanel.classList.toggle('open', visible.length > 0);
+  orderListEl.innerHTML = '';
 
-  updateOrderPanelText(drone.status);
+  for (const order of visible) {
+    const drone = dronesById.get(order.droneId);
+    const droneStatus = drone ? drone.status : null;
+    const statusText = STATUS_LABEL[droneStatus] || order.status;
 
-  if (drone.status === 'awaiting_pickup' && activeOrder.status === 'assigned') {
-    orderActionBtn.textContent = 'אשר איסוף';
-    orderActionBtn.onclick = confirmPickup;
-    orderActionBtn.style.display = 'block';
-  } else if (drone.status === 'to_destination') {
-    orderActionBtn.style.display = 'none';
-  } else if (drone.status === 'awaiting_delivery' && activeOrder.status === 'in_transit') {
-    orderActionBtn.textContent = 'אשר מסירה';
-    orderActionBtn.onclick = confirmDelivery;
-    orderActionBtn.style.display = 'block';
-  } else if (drone.status === 'returning_home' || drone.status === 'idle') {
-    setTimeout(closeOrderPanel, 2500);
+    const card = document.createElement('div');
+    card.className = 'order-card';
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'order-name';
+    nameEl.textContent = `${order.name} (${order.id})`;
+    card.appendChild(nameEl);
+
+    const statusEl2 = document.createElement('div');
+    statusEl2.className = 'order-status';
+    statusEl2.textContent = statusText;
+    card.appendChild(statusEl2);
+
+    if (order.price !== null && order.price !== undefined) {
+      const priceEl = document.createElement('div');
+      priceEl.className = 'order-price';
+      priceEl.textContent = `${order.price} ₪ · ${order.distanceKm} ק"מ · כ-${order.etaMinutes} דק'`;
+      card.appendChild(priceEl);
+    }
+
+    if (droneStatus === 'awaiting_pickup' && order.status === 'assigned') {
+      const btn = document.createElement('button');
+      btn.textContent = 'אשר איסוף';
+      btn.onclick = () => confirmPickup(order.id);
+      card.appendChild(btn);
+    } else if (droneStatus === 'awaiting_delivery' && order.status === 'in_transit') {
+      const btn = document.createElement('button');
+      btn.textContent = 'אשר מסירה';
+      btn.onclick = () => confirmDelivery(order.id);
+      card.appendChild(btn);
+    }
+
+    orderListEl.appendChild(card);
   }
 }
 
 // --- Map rendering: drone markers + in-place route lines (updated, not
 // recreated, every poll - recreating them each tick is what caused the
-// flicker/behavior bugs in the previous version) ---
-function upsertDroneMarker(drone) {
+// flicker/behavior bugs in an earlier version) ---
+function upsertDroneMarker(drone, orderNameByDroneId) {
   const color = STATUS_COLOR[drone.status] || '#64748b';
-  const popupText = `${drone.id}<br/>סטטוס: ${STATUS_LABEL[drone.status] || drone.status}${drone.orderId ? `<br/>הזמנה: ${drone.orderId}` : ''}`;
+  const orderName = orderNameByDroneId.get(drone.id);
+  const popupText = `${drone.id}<br/>סטטוס: ${STATUS_LABEL[drone.status] || drone.status}${orderName ? `<br/>הזמנה: ${orderName}` : ''}`;
   let marker = droneMarkers.get(drone.id);
   if (!marker) {
     marker = L.circleMarker([drone.lat, drone.lng], {
@@ -356,17 +365,26 @@ function removeRoute(droneId) {
   routeLines.delete(droneId);
 }
 
-async function pollDrones() {
+async function pollAll() {
   try {
-    const res = await fetch('/drones');
-    if (!res.ok) {
-      setStatus(`שגיאה בטעינת רחפנים (${res.status})`);
+    const [dronesRes, ordersRes] = await Promise.all([fetch('/drones'), fetch('/orders')]);
+    if (!dronesRes.ok) {
+      setStatus(`שגיאה בטעינת רחפנים (${dronesRes.status})`);
       return;
     }
-    const drones = await res.json();
-    drones.forEach(upsertDroneMarker);
+    const drones = await dronesRes.json();
+    const orders = ordersRes.ok ? await ordersRes.json() : [];
+
+    const orderNameByDroneId = new Map();
+    for (const order of orders) {
+      if (order.status !== 'completed') orderNameByDroneId.set(order.droneId, order.name);
+    }
+
+    drones.forEach((d) => upsertDroneMarker(d, orderNameByDroneId));
     drones.forEach(upsertRoute);
-    drones.forEach(reactToDroneStatus);
+
+    const dronesById = new Map(drones.map((d) => [d.id, d]));
+    renderOrders(orders, dronesById);
 
     const busy = drones.filter((d) => d.status !== 'idle').length;
     setStatus(`${busy} רחפנים בפעולה מתוך ${drones.length}`);
@@ -374,5 +392,5 @@ async function pollDrones() {
     setStatus('אין חיבור לשרת');
   }
 }
-setInterval(pollDrones, POLL_MS);
-pollDrones();
+setInterval(pollAll, POLL_MS);
+pollAll();

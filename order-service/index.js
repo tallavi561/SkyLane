@@ -6,6 +6,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = process.env.PORT || 4000;
 const DRONE_FLEET_URL = process.env.DRONE_FLEET_URL || 'http://localhost:4001';
+const PRICING_URL = process.env.PRICING_URL || 'http://localhost:4002';
 
 const config = {
   ERROR_RATE: Number(process.env.ERROR_RATE ?? 0.03),
@@ -52,6 +53,22 @@ function validatePoint(point) {
   );
 }
 
+async function getDroneSpeedKmh() {
+  const res = await fetch(`${DRONE_FLEET_URL}/health`);
+  const body = await res.json();
+  return body.speedKmh;
+}
+
+async function getQuote(distanceKm, etaMinutes) {
+  const res = await fetch(`${PRICING_URL}/quote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ distanceKm, etaMinutes }),
+  });
+  if (!res.ok) throw new Error(`pricing-service returned ${res.status}`);
+  return res.json();
+}
+
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
@@ -75,15 +92,31 @@ app.get('/drones', async (_req, res) => {
 });
 
 app.post('/orders', async (req, res) => {
-  const { source, destination } = req.body ?? {};
+  const { name, source, destination } = req.body ?? {};
+  if (typeof name !== 'string' || name.trim().length === 0) {
+    return res.status(400).json({ error: 'name is required' });
+  }
   if (!validatePoint(source) || !validatePoint(destination)) {
     return res.status(400).json({ error: 'source and destination must each be { lat, lng }' });
   }
 
   const blockedZone = findRestrictedZone(source) || findRestrictedZone(destination);
   if (blockedZone) {
-    logEvent('ORDER_REJECTED', { source, destination, reason: `inside restricted zone: ${blockedZone.name}` });
+    logEvent('ORDER_REJECTED', { name, source, destination, reason: `inside restricted zone: ${blockedZone.name}` });
     return res.status(403).json({ error: `point is inside a no-fly zone: ${blockedZone.name}` });
+  }
+
+  const distanceKm = haversineMeters(source, destination) / 1000;
+  let etaMinutes = null;
+  let price = null;
+  try {
+    const speedKmh = await getDroneSpeedKmh();
+    etaMinutes = Math.round((distanceKm / speedKmh) * 60 * 10) / 10;
+    const quote = await getQuote(distanceKm, etaMinutes);
+    price = quote.price;
+  } catch (err) {
+    // Pricing is informational - an order can still be created without it.
+    logEvent('ERROR', { message: `pricing unavailable: ${err.message}` });
   }
 
   const id = `ORDER-${nextOrderId++}`;
@@ -95,13 +128,23 @@ app.post('/orders', async (req, res) => {
     });
     const body = await upstream.json();
     if (!upstream.ok) {
-      logEvent('ORDER_REJECTED', { orderId: id, source, destination, reason: body.error });
+      logEvent('ORDER_REJECTED', { orderId: id, name, source, destination, reason: body.error });
       return res.status(upstream.status).json(body);
     }
 
-    const order = { id, source, destination, droneId: body.droneId, status: 'assigned' };
+    const order = {
+      id,
+      name: name.trim(),
+      source,
+      destination,
+      droneId: body.droneId,
+      status: 'assigned',
+      distanceKm: Math.round(distanceKm * 100) / 100,
+      etaMinutes,
+      price,
+    };
     orders.set(id, order);
-    logEvent('ORDER_CREATED', { orderId: id, droneId: body.droneId, source, destination });
+    logEvent('ORDER_CREATED', { orderId: id, name: order.name, droneId: body.droneId, distanceKm: order.distanceKm, etaMinutes, price });
     res.status(201).json(order);
   } catch (err) {
     res.status(502).json({ error: 'drone-fleet-service unreachable' });

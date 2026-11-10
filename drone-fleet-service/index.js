@@ -3,7 +3,7 @@ import express from 'express';
 const PORT = process.env.PORT || 4001;
 const TICK_MS = 1000;
 const FLEET_SIZE = Number(process.env.FLEET_SIZE ?? 10);
-const SPEED_KMH = Number(process.env.SPEED_KMH ?? 150);
+const SPEED_KMH = Number(process.env.SPEED_KMH ?? 450);
 const ARRIVAL_THRESHOLD_M = 150;
 
 // Bounding box roughly covering Israel - used for each drone's fixed home base.
@@ -100,7 +100,7 @@ setInterval(() => {
 const app = express();
 app.use(express.json());
 
-app.get('/health', (_req, res) => res.json({ status: 'ok', fleetSize: FLEET_SIZE }));
+app.get('/health', (_req, res) => res.json({ status: 'ok', fleetSize: FLEET_SIZE, speedKmh: SPEED_KMH }));
 
 app.get('/drones', (_req, res) => {
   res.json(drones.map(({ pendingDestination, ...publicFields }) => publicFields));

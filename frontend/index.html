@@ -30,14 +30,14 @@
     #actionMsg.success { background: #16a34a; display: block; }
     #actionMsg.error { background: #dc2626; display: block; }
 
-    #composerPanel, #orderPanel {
+    #composerPanel {
       position: absolute; top: 64px; right: 16px; z-index: 1000;
       background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.25);
       padding: 14px; width: 240px; display: none;
     }
-    #composerPanel.open, #orderPanel.open { display: block; }
-    #composerPanel h2, #orderPanel h2 { font-size: 15px; margin: 0 0 10px; }
-    #composerPanel button, #orderPanel button { width: 100%; margin-bottom: 8px; text-align: right; }
+    #composerPanel.open { display: block; }
+    #composerPanel h2 { font-size: 15px; margin: 0 0 10px; }
+    #composerPanel button { width: 100%; margin-bottom: 8px; text-align: right; }
     #pickSourceBtn { background: #16a34a; color: white; }
     #pickSourceBtn.chosen { background: #bbf7d0; color: #166534; }
     #pickSourceBtn.active { outline: 2px solid #86efac; }
@@ -45,8 +45,28 @@
     #pickDestinationBtn.chosen { background: #fecaca; color: #991b1b; }
     #pickDestinationBtn.active { outline: 2px solid #fca5a5; }
     #cancelOrderBtn { background: #e2e8f0; color: #0f172a; }
-    #orderPanel p { font-size: 13px; color: #334155; margin: 0 0 10px; }
-    #orderActionBtn { background: #2563eb; color: white; }
+    #nameStep { display: none; margin-bottom: 8px; }
+    #orderNameInput {
+      width: 100%; box-sizing: border-box; padding: 7px 10px; margin-bottom: 8px;
+      border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; text-align: right;
+    }
+    #submitOrderBtn { background: #2563eb; color: white; }
+
+    #orderPanel {
+      position: absolute; top: 64px; right: 16px; z-index: 1000;
+      background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+      padding: 14px; width: 260px; max-height: 70vh; overflow-y: auto; display: none;
+    }
+    #orderPanel.open { display: block; }
+    #orderPanel h2 { font-size: 15px; margin: 0 0 10px; }
+    .order-card {
+      border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px; margin-bottom: 10px;
+    }
+    .order-card:last-child { margin-bottom: 0; }
+    .order-card .order-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+    .order-card .order-status { font-size: 13px; color: #334155; margin-bottom: 4px; }
+    .order-card .order-price { font-size: 12px; color: #64748b; margin-bottom: 6px; }
+    .order-card button { width: 100%; background: #2563eb; color: white; }
 
     .route-arrow div { font-size: 18px; line-height: 1; }
   </style>
@@ -64,13 +84,16 @@
     <h2>הזמנת משלוח</h2>
     <button id="pickSourceBtn">נקודת התחלה</button>
     <button id="pickDestinationBtn" disabled>נקודת יעד</button>
+    <div id="nameStep">
+      <input id="orderNameInput" type="text" placeholder="שם ההזמנה" maxlength="40" />
+      <button id="submitOrderBtn">צור הזמנה</button>
+    </div>
     <button id="cancelOrderBtn">בטל</button>
   </div>
 
   <div id="orderPanel">
-    <h2 id="orderTitle"></h2>
-    <p id="orderStatusText"></p>
-    <button id="orderActionBtn" style="display:none"></button>
+    <h2>הזמנות פעילות</h2>
+    <div id="orderList"></div>
   </div>
 
   <div id="map"></div>
