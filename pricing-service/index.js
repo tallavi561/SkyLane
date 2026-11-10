@@ -6,8 +6,38 @@ const BASE_FEE = Number(process.env.BASE_FEE ?? 15);
 const PRICE_PER_KM = Number(process.env.PRICE_PER_KM ?? 3);
 const PRICE_PER_MINUTE = Number(process.env.PRICE_PER_MINUTE ?? 1);
 
-function logEvent(event, details) {
-  console.log(JSON.stringify({ ts: new Date().toISOString(), service: 'pricing-service', event, ...details }));
+// --- MoSes Monitor integration (see moses-monitoring-skill.md) ---
+const MOSES_BASE_URL = process.env.MOSES_BASE_URL || 'https://api-gateway-x17f.onrender.com';
+const MOSES_SERVICE_NAME = 'pricing-service';
+const MOSES_HEARTBEAT_MS = 20000;
+
+function sendMosesHeartbeat(status = 'UP') {
+  fetch(`${MOSES_BASE_URL}/api/process/heartbeat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      serviceName: MOSES_SERVICE_NAME,
+      status,
+      description: "Quotes a delivery's price from its distance and estimated flight time",
+    }),
+  }).catch((err) => console.error(`[moses] heartbeat failed: ${err.message}`));
+}
+
+function sendMosesLog(logLevel, rawMessage) {
+  fetch(`${MOSES_BASE_URL}/api/logs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ serviceName: MOSES_SERVICE_NAME, logLevel, rawMessage }),
+  }).catch(() => {});
+}
+
+sendMosesHeartbeat();
+setInterval(() => sendMosesHeartbeat(), MOSES_HEARTBEAT_MS);
+
+function logEvent(event, details, logLevel = 2) {
+  const payload = { ts: new Date().toISOString(), service: 'pricing-service', event, ...details };
+  console.log(JSON.stringify(payload));
+  sendMosesLog(logLevel, `${event} ${JSON.stringify(details)}`);
 }
 
 const app = express();

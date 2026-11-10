@@ -12,6 +12,35 @@ const config = {
   ERROR_RATE: Number(process.env.ERROR_RATE ?? 0.03),
 };
 
+// --- MoSes Monitor integration (see moses-monitoring-skill.md) ---
+const MOSES_BASE_URL = process.env.MOSES_BASE_URL || 'https://api-gateway-x17f.onrender.com';
+const MOSES_SERVICE_NAME = 'order-service';
+const MOSES_HEARTBEAT_MS = 20000;
+
+function sendMosesHeartbeat(status = 'UP') {
+  fetch(`${MOSES_BASE_URL}/api/process/heartbeat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      serviceName: MOSES_SERVICE_NAME,
+      status,
+      description: 'Delivery order API; assigns drones and prices orders',
+      connections: ['drone-fleet-service', 'pricing-service'],
+    }),
+  }).catch((err) => console.error(`[moses] heartbeat failed: ${err.message}`));
+}
+
+function sendMosesLog(logLevel, rawMessage) {
+  fetch(`${MOSES_BASE_URL}/api/logs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ serviceName: MOSES_SERVICE_NAME, logLevel, rawMessage }),
+  }).catch(() => {});
+}
+
+sendMosesHeartbeat();
+setInterval(() => sendMosesHeartbeat(), MOSES_HEARTBEAT_MS);
+
 // No-fly zones: orders whose source or destination falls inside one are rejected.
 const RESTRICTED_ZONES = [
   { name: 'Ben Gurion Airport (LLBG)', lat: 32.0055, lng: 34.8854, radiusM: 8000 },
@@ -39,8 +68,12 @@ function findRestrictedZone(point) {
   return RESTRICTED_ZONES.find((zone) => haversineMeters(point, zone) <= zone.radiusM);
 }
 
-function logEvent(event, details) {
-  console.log(JSON.stringify({ ts: new Date().toISOString(), service: 'order-service', event, ...details }));
+const LOG_LEVEL = { INFO: 2, WARN: 3, ERROR: 4 };
+
+function logEvent(event, details, logLevel = event === 'ERROR' ? LOG_LEVEL.ERROR : LOG_LEVEL.INFO) {
+  const payload = { ts: new Date().toISOString(), service: 'order-service', event, ...details };
+  console.log(JSON.stringify(payload));
+  sendMosesLog(logLevel, `${event} ${JSON.stringify(details)}`);
 }
 
 function validatePoint(point) {
@@ -68,6 +101,38 @@ async function getQuote(distanceKm, etaMinutes) {
   if (!res.ok) throw new Error(`pricing-service returned ${res.status}`);
   return res.json();
 }
+
+// drone-fleet-service gives up on an unconfirmed pickup/delivery on its own
+// (see INPUT_TIMEOUT_MS there) and sends the drone home. This periodically
+// notices that - the drone no longer references the order - and marks the
+// order accordingly, so its confirm button doesn't linger forever.
+const ORDER_TIMEOUT_CHECK_MS = 3000;
+
+async function checkForTimedOutOrders() {
+  const pending = [...orders.values()].filter((o) => o.status === 'assigned' || o.status === 'in_transit');
+  if (pending.length === 0) return;
+
+  try {
+    const res = await fetch(`${DRONE_FLEET_URL}/drones`);
+    if (!res.ok) return;
+    const drones = await res.json();
+    const dronesById = new Map(drones.map((d) => [d.id, d]));
+
+    for (const order of pending) {
+      const drone = dronesById.get(order.droneId);
+      if (!drone || drone.orderId !== order.id) {
+        order.status = 'timed_out';
+        logEvent('ORDER_TIMED_OUT', { orderId: order.id, droneId: order.droneId }, LOG_LEVEL.WARN);
+      }
+    }
+  } catch (err) {
+    // drone-fleet-service unreachable - try again on the next tick.
+  }
+}
+
+setInterval(() => {
+  checkForTimedOutOrders();
+}, ORDER_TIMEOUT_CHECK_MS);
 
 const app = express();
 app.use(express.json());

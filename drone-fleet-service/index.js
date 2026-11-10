@@ -3,8 +3,42 @@ import express from 'express';
 const PORT = process.env.PORT || 4001;
 const TICK_MS = 1000;
 const FLEET_SIZE = Number(process.env.FLEET_SIZE ?? 10);
-const SPEED_KMH = Number(process.env.SPEED_KMH ?? 450);
+const SPEED_KMH = Number(process.env.SPEED_KMH ?? 5000);
 const ARRIVAL_THRESHOLD_M = 150;
+
+// How long a drone waits in `awaiting_pickup` / `awaiting_delivery` for a
+// human to confirm before giving up: a warning is logged first, then the
+// drone abandons the order and heads home if still no input.
+const INPUT_WARNING_MS = Number(process.env.INPUT_WARNING_MS ?? 15000);
+const INPUT_TIMEOUT_MS = Number(process.env.INPUT_TIMEOUT_MS ?? 30000);
+
+// --- MoSes Monitor integration (see moses-monitoring-skill.md) ---
+const MOSES_BASE_URL = process.env.MOSES_BASE_URL || 'https://api-gateway-x17f.onrender.com';
+const MOSES_SERVICE_NAME = 'drone-fleet-service';
+const MOSES_HEARTBEAT_MS = 20000;
+
+function sendMosesHeartbeat(status = 'UP') {
+  fetch(`${MOSES_BASE_URL}/api/process/heartbeat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      serviceName: MOSES_SERVICE_NAME,
+      status,
+      description: "Owns the drone fleet's live state and movement simulation",
+    }),
+  }).catch((err) => console.error(`[moses] heartbeat failed: ${err.message}`));
+}
+
+function sendMosesLog(logLevel, rawMessage) {
+  fetch(`${MOSES_BASE_URL}/api/logs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ serviceName: MOSES_SERVICE_NAME, logLevel, rawMessage }),
+  }).catch(() => {});
+}
+
+sendMosesHeartbeat();
+setInterval(() => sendMosesHeartbeat(), MOSES_HEARTBEAT_MS);
 
 // Bounding box roughly covering Israel - used for each drone's fixed home base.
 const BOUNDS = { minLat: 29.5, maxLat: 33.3, minLng: 34.2, maxLng: 35.9 };
@@ -30,8 +64,12 @@ function randomPointInBounds() {
   return { lat: randomBetween(BOUNDS.minLat, BOUNDS.maxLat), lng: randomBetween(BOUNDS.minLng, BOUNDS.maxLng) };
 }
 
-function logEvent(event, details) {
-  console.log(JSON.stringify({ ts: new Date().toISOString(), service: 'drone-fleet-service', event, ...details }));
+const LOG_LEVEL = { INFO: 2, WARN: 3 };
+
+function logEvent(event, details, logLevel = LOG_LEVEL.INFO) {
+  const payload = { ts: new Date().toISOString(), service: 'drone-fleet-service', event, ...details };
+  console.log(JSON.stringify(payload));
+  sendMosesLog(logLevel, `${event} ${JSON.stringify(details)}`);
 }
 
 /** @typedef {'idle'|'to_pickup'|'awaiting_pickup'|'to_destination'|'awaiting_delivery'|'returning_home'} DroneStatus */
@@ -47,6 +85,8 @@ const drones = Array.from({ length: FLEET_SIZE }, (_, i) => {
     target: null,
     orderId: null,
     pendingDestination: null,
+    awaitingSince: null,
+    inputWarning: false,
   };
 });
 
@@ -64,6 +104,15 @@ function findNearestIdleDrone(point) {
   return nearest;
 }
 
+function sendDroneHome(drone) {
+  drone.status = 'returning_home';
+  drone.target = drone.home;
+  drone.orderId = null;
+  drone.pendingDestination = null;
+  drone.awaitingSince = null;
+  drone.inputWarning = false;
+}
+
 function moveDrone(drone) {
   if (!drone.target) return;
 
@@ -76,9 +125,11 @@ function moveDrone(drone) {
 
     if (arrivedStatus === 'to_pickup') {
       drone.status = 'awaiting_pickup';
+      drone.awaitingSince = Date.now();
       logEvent('DRONE_ARRIVED_PICKUP', { droneId: drone.id, orderId: drone.orderId });
     } else if (arrivedStatus === 'to_destination') {
       drone.status = 'awaiting_delivery';
+      drone.awaitingSince = Date.now();
       logEvent('DRONE_ARRIVED_DESTINATION', { droneId: drone.id, orderId: drone.orderId });
     } else if (arrivedStatus === 'returning_home') {
       drone.status = 'idle';
@@ -93,8 +144,37 @@ function moveDrone(drone) {
   drone.lng += (drone.target.lng - drone.lng) * fraction;
 }
 
+function checkInputTimeout(drone) {
+  if (drone.status !== 'awaiting_pickup' && drone.status !== 'awaiting_delivery') return;
+  if (!drone.awaitingSince) return;
+
+  const waitedMs = Date.now() - drone.awaitingSince;
+
+  if (waitedMs >= INPUT_TIMEOUT_MS) {
+    logEvent(
+      'DRONE_INPUT_TIMEOUT',
+      { droneId: drone.id, orderId: drone.orderId, status: drone.status, waitedMs },
+      LOG_LEVEL.WARN
+    );
+    sendDroneHome(drone);
+    return;
+  }
+
+  if (waitedMs >= INPUT_WARNING_MS && !drone.inputWarning) {
+    drone.inputWarning = true;
+    logEvent(
+      'DRONE_INPUT_WARNING',
+      { droneId: drone.id, orderId: drone.orderId, status: drone.status, waitedMs },
+      LOG_LEVEL.WARN
+    );
+  }
+}
+
 setInterval(() => {
-  for (const drone of drones) moveDrone(drone);
+  for (const drone of drones) {
+    moveDrone(drone);
+    checkInputTimeout(drone);
+  }
 }, TICK_MS);
 
 const app = express();
@@ -103,7 +183,7 @@ app.use(express.json());
 app.get('/health', (_req, res) => res.json({ status: 'ok', fleetSize: FLEET_SIZE, speedKmh: SPEED_KMH }));
 
 app.get('/drones', (_req, res) => {
-  res.json(drones.map(({ pendingDestination, ...publicFields }) => publicFields));
+  res.json(drones.map(({ pendingDestination, awaitingSince, ...publicFields }) => publicFields));
 });
 
 app.post('/reserve', (req, res) => {
@@ -136,6 +216,8 @@ app.post('/drones/:id/confirm-pickup', (req, res) => {
   drone.status = 'to_destination';
   drone.target = drone.pendingDestination;
   drone.pendingDestination = null;
+  drone.awaitingSince = null;
+  drone.inputWarning = false;
 
   logEvent('DRONE_PICKED_UP', { droneId: drone.id, orderId: drone.orderId });
   res.json({ status: 'ok' });
@@ -149,9 +231,7 @@ app.post('/drones/:id/confirm-delivery', (req, res) => {
   }
 
   logEvent('DRONE_DELIVERED', { droneId: drone.id, orderId: drone.orderId });
-  drone.status = 'returning_home';
-  drone.target = drone.home;
-  drone.orderId = null;
+  sendDroneHome(drone);
 
   res.json({ status: 'ok' });
 });

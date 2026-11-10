@@ -236,9 +236,9 @@ async function confirmDelivery(orderId) {
 }
 
 // An order stays visible to every viewer for a little while after it's
-// completed, then quietly drops off each browser's own list.
+// completed (or timed out), then quietly drops off each browser's own list.
 function isOrderVisible(order) {
-  if (order.status !== 'completed') return true;
+  if (order.status !== 'completed' && order.status !== 'timed_out') return true;
   if (!completedSeenAt.has(order.id)) completedSeenAt.set(order.id, Date.now());
   return Date.now() - completedSeenAt.get(order.id) < COMPLETED_VISIBLE_MS;
 }
@@ -251,7 +251,8 @@ function renderOrders(orders, dronesById) {
   for (const order of visible) {
     const drone = dronesById.get(order.droneId);
     const droneStatus = drone ? drone.status : null;
-    const statusText = STATUS_LABEL[droneStatus] || order.status;
+    const statusText =
+      order.status === 'timed_out' ? 'אין תגובה בזמן - ההזמנה בוטלה, הרחפן חוזר לבסיס' : STATUS_LABEL[droneStatus] || order.status;
 
     const card = document.createElement('div');
     card.className = 'order-card';
@@ -265,6 +266,13 @@ function renderOrders(orders, dronesById) {
     statusEl2.className = 'order-status';
     statusEl2.textContent = statusText;
     card.appendChild(statusEl2);
+
+    if (drone && drone.inputWarning && order.status !== 'timed_out') {
+      const warningEl = document.createElement('div');
+      warningEl.className = 'order-warning';
+      warningEl.textContent = '⚠ אין תגובה - הרחפן יחזור לבסיס בקרוב אם לא תאשר';
+      card.appendChild(warningEl);
+    }
 
     if (order.price !== null && order.price !== undefined) {
       const priceEl = document.createElement('div');
