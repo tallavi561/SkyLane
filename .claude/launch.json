@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "traffic-service",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "traffic-service", "start"],
+      "port": 4000
+    }
+  ]
+}

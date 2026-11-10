@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SkyLane</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { position: absolute; top: 56px; bottom: 0; left: 0; right: 0; }
+    #toolbar {
+      height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 16px;
+      background: #0f172a; color: white; box-sizing: border-box;
+    }
+    #toolbar h1 { font-size: 18px; margin: 0; margin-left: auto; }
+    button {
+      border: none; border-radius: 6px; padding: 8px 14px; font-size: 14px; cursor: pointer;
+    }
+    #newFlightBtn { background: #2563eb; color: white; }
+    #newFlightBtn.active { background: #1d4ed8; outline: 2px solid #93c5fd; }
+    #vehicleModeBtn { background: #16a34a; color: white; }
+    #vehicleModeBtn.active { background: #15803d; outline: 2px solid #86efac; }
+    #status { color: #cbd5e1; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <button id="newFlightBtn">טיסה חדשה</button>
+    <button id="vehicleModeBtn">אני רכב</button>
+    <span id="status"></span>
+    <h1>SkyLane</h1>
+  </div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
