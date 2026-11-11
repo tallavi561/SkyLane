@@ -1,6 +1,8 @@
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -17,6 +19,40 @@ const MOSES_BASE_URL = process.env.MOSES_BASE_URL || 'https://api-gateway-x17f.o
 const MOSES_SERVICE_NAME = 'order-service';
 const MOSES_HEARTBEAT_MS = 20000;
 
+let lastCpuUsage = process.cpuUsage();
+let lastCpuSampleAt = Date.now();
+
+function sampleResourceUsage() {
+  const now = Date.now();
+  const elapsedMs = now - lastCpuSampleAt;
+  const diff = process.cpuUsage(lastCpuUsage);
+  lastCpuUsage = process.cpuUsage();
+  lastCpuSampleAt = now;
+
+  const metrics = {};
+  if (elapsedMs > 0) {
+    metrics.cpuPercent = Math.round(((diff.user + diff.system) / (elapsedMs * 1000)) * 1000) / 10;
+  }
+  const memoryMb = process.memoryUsage().rss / (1024 * 1024);
+  if (Number.isFinite(memoryMb)) metrics.memoryMb = Math.round(memoryMb * 10) / 10;
+  return metrics;
+}
+
+// Request-scoped trace context (traceId/spanId/parentSpanId), set by the
+// trace middleware below. logEvent/sendMosesLog read it automatically, and
+// traceHeaders() forwards it on every outbound call to another service.
+const traceContext = new AsyncLocalStorage();
+function currentTrace() {
+  return traceContext.getStore() || {};
+}
+function traceHeaders() {
+  const { traceId, spanId } = currentTrace();
+  const headers = {};
+  if (traceId) headers['X-Trace-Id'] = traceId;
+  if (spanId) headers['X-Parent-Span-Id'] = spanId;
+  return headers;
+}
+
 function sendMosesHeartbeat(status = 'UP') {
   fetch(`${MOSES_BASE_URL}/api/process/heartbeat`, {
     method: 'POST',
@@ -26,15 +62,24 @@ function sendMosesHeartbeat(status = 'UP') {
       status,
       description: 'Delivery order API; assigns drones and prices orders',
       connections: ['drone-fleet-service', 'pricing-service'],
+      ...sampleResourceUsage(),
     }),
   }).catch((err) => console.error(`[moses] heartbeat failed: ${err.message}`));
 }
 
-function sendMosesLog(logLevel, rawMessage) {
+function sendMosesLog(logLevel, rawMessage, ip) {
+  const { traceId, spanId } = currentTrace();
   fetch(`${MOSES_BASE_URL}/api/logs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ serviceName: MOSES_SERVICE_NAME, logLevel, rawMessage }),
+    body: JSON.stringify({
+      serviceName: MOSES_SERVICE_NAME,
+      logLevel,
+      rawMessage,
+      ...(ip ? { ip } : {}),
+      ...(traceId ? { traceId } : {}),
+      ...(spanId ? { spanId } : {}),
+    }),
   }).catch(() => {});
 }
 
@@ -70,10 +115,10 @@ function findRestrictedZone(point) {
 
 const LOG_LEVEL = { INFO: 2, WARN: 3, ERROR: 4 };
 
-function logEvent(event, details, logLevel = event === 'ERROR' ? LOG_LEVEL.ERROR : LOG_LEVEL.INFO) {
+function logEvent(event, details, logLevel = event === 'ERROR' ? LOG_LEVEL.ERROR : LOG_LEVEL.INFO, ip) {
   const payload = { ts: new Date().toISOString(), service: 'order-service', event, ...details };
   console.log(JSON.stringify(payload));
-  sendMosesLog(logLevel, `${event} ${JSON.stringify(details)}`);
+  sendMosesLog(logLevel, `${event} ${JSON.stringify(details)}`, ip);
 }
 
 function validatePoint(point) {
@@ -87,7 +132,7 @@ function validatePoint(point) {
 }
 
 async function getDroneSpeedKmh() {
-  const res = await fetch(`${DRONE_FLEET_URL}/health`);
+  const res = await fetch(`${DRONE_FLEET_URL}/health`, { headers: traceHeaders() });
   const body = await res.json();
   return body.speedKmh;
 }
@@ -95,7 +140,7 @@ async function getDroneSpeedKmh() {
 async function getQuote(distanceKm, etaMinutes) {
   const res = await fetch(`${PRICING_URL}/quote`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...traceHeaders() },
     body: JSON.stringify({ distanceKm, etaMinutes }),
   });
   if (!res.ok) throw new Error(`pricing-service returned ${res.status}`);
@@ -138,6 +183,23 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
 
+// Trace correlation + request logging (see moses-monitoring-skill.md).
+app.use((req, res, next) => {
+  const traceId = req.headers['x-trace-id'] || crypto.randomUUID();
+  const spanId = crypto.randomBytes(4).toString('hex');
+  const parentSpanId = req.headers['x-parent-span-id'] || undefined;
+  const startedAt = Date.now();
+
+  traceContext.run({ traceId, spanId, parentSpanId }, () => {
+    res.on('finish', () => {
+      const durationMs = Date.now() - startedAt;
+      const level = res.statusCode >= 500 ? LOG_LEVEL.ERROR : res.statusCode >= 400 ? LOG_LEVEL.WARN : LOG_LEVEL.INFO;
+      logEvent('REQUEST', { method: req.method, path: req.originalUrl, status: res.statusCode, durationMs }, level, req.ip);
+    });
+    next();
+  });
+});
+
 app.get('/health', (_req, res) => res.json({ status: 'ok', config }));
 
 // Proxied so the frontend only talks to one origin, and so every poll shows
@@ -148,7 +210,7 @@ app.get('/drones', async (_req, res) => {
     return res.status(500).json({ error: 'synthetic failure (ERROR_RATE injected)' });
   }
   try {
-    const upstream = await fetch(`${DRONE_FLEET_URL}/drones`);
+    const upstream = await fetch(`${DRONE_FLEET_URL}/drones`, { headers: traceHeaders() });
     const body = await upstream.json();
     res.status(upstream.status).json(body);
   } catch (err) {
@@ -188,7 +250,7 @@ app.post('/orders', async (req, res) => {
   try {
     const upstream = await fetch(`${DRONE_FLEET_URL}/reserve`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...traceHeaders() },
       body: JSON.stringify({ orderId: id, source, destination }),
     });
     const body = await upstream.json();
@@ -229,7 +291,7 @@ app.post('/orders/:id/confirm-pickup', async (req, res) => {
   if (!order) return res.status(404).json({ error: 'order not found' });
 
   try {
-    const upstream = await fetch(`${DRONE_FLEET_URL}/drones/${order.droneId}/confirm-pickup`, { method: 'POST' });
+    const upstream = await fetch(`${DRONE_FLEET_URL}/drones/${order.droneId}/confirm-pickup`, { method: 'POST', headers: traceHeaders() });
     const body = await upstream.json();
     if (!upstream.ok) return res.status(upstream.status).json(body);
 
@@ -246,7 +308,7 @@ app.post('/orders/:id/confirm-delivery', async (req, res) => {
   if (!order) return res.status(404).json({ error: 'order not found' });
 
   try {
-    const upstream = await fetch(`${DRONE_FLEET_URL}/drones/${order.droneId}/confirm-delivery`, { method: 'POST' });
+    const upstream = await fetch(`${DRONE_FLEET_URL}/drones/${order.droneId}/confirm-delivery`, { method: 'POST', headers: traceHeaders() });
     const body = await upstream.json();
     if (!upstream.ok) return res.status(upstream.status).json(body);
 

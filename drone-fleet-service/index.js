@@ -1,4 +1,6 @@
 import express from 'express';
+import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 const PORT = process.env.PORT || 4001;
 const TICK_MS = 1000;
@@ -17,6 +19,34 @@ const MOSES_BASE_URL = process.env.MOSES_BASE_URL || 'https://api-gateway-x17f.o
 const MOSES_SERVICE_NAME = 'drone-fleet-service';
 const MOSES_HEARTBEAT_MS = 20000;
 
+// Resource metrics sampled at each heartbeat - cpuPercent is the delta of
+// process.cpuUsage() over the interval, as a percent of one core.
+let lastCpuUsage = process.cpuUsage();
+let lastCpuSampleAt = Date.now();
+
+function sampleResourceUsage() {
+  const now = Date.now();
+  const elapsedMs = now - lastCpuSampleAt;
+  const diff = process.cpuUsage(lastCpuUsage);
+  lastCpuUsage = process.cpuUsage();
+  lastCpuSampleAt = now;
+
+  const metrics = {};
+  if (elapsedMs > 0) {
+    metrics.cpuPercent = Math.round(((diff.user + diff.system) / (elapsedMs * 1000)) * 1000) / 10;
+  }
+  const memoryMb = process.memoryUsage().rss / (1024 * 1024);
+  if (Number.isFinite(memoryMb)) metrics.memoryMb = Math.round(memoryMb * 10) / 10;
+  return metrics;
+}
+
+// Request-scoped trace context (traceId/spanId), set by the trace middleware
+// below and read automatically by logEvent/sendMosesLog.
+const traceContext = new AsyncLocalStorage();
+function currentTrace() {
+  return traceContext.getStore() || {};
+}
+
 function sendMosesHeartbeat(status = 'UP') {
   fetch(`${MOSES_BASE_URL}/api/process/heartbeat`, {
     method: 'POST',
@@ -25,15 +55,24 @@ function sendMosesHeartbeat(status = 'UP') {
       serviceName: MOSES_SERVICE_NAME,
       status,
       description: "Owns the drone fleet's live state and movement simulation",
+      ...sampleResourceUsage(),
     }),
   }).catch((err) => console.error(`[moses] heartbeat failed: ${err.message}`));
 }
 
-function sendMosesLog(logLevel, rawMessage) {
+function sendMosesLog(logLevel, rawMessage, ip) {
+  const { traceId, spanId } = currentTrace();
   fetch(`${MOSES_BASE_URL}/api/logs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ serviceName: MOSES_SERVICE_NAME, logLevel, rawMessage }),
+    body: JSON.stringify({
+      serviceName: MOSES_SERVICE_NAME,
+      logLevel,
+      rawMessage,
+      ...(ip ? { ip } : {}),
+      ...(traceId ? { traceId } : {}),
+      ...(spanId ? { spanId } : {}),
+    }),
   }).catch(() => {});
 }
 
@@ -64,12 +103,12 @@ function randomPointInBounds() {
   return { lat: randomBetween(BOUNDS.minLat, BOUNDS.maxLat), lng: randomBetween(BOUNDS.minLng, BOUNDS.maxLng) };
 }
 
-const LOG_LEVEL = { INFO: 2, WARN: 3 };
+const LOG_LEVEL = { INFO: 2, WARN: 3, ERROR: 4 };
 
-function logEvent(event, details, logLevel = LOG_LEVEL.INFO) {
+function logEvent(event, details, logLevel = LOG_LEVEL.INFO, ip) {
   const payload = { ts: new Date().toISOString(), service: 'drone-fleet-service', event, ...details };
   console.log(JSON.stringify(payload));
-  sendMosesLog(logLevel, `${event} ${JSON.stringify(details)}`);
+  sendMosesLog(logLevel, `${event} ${JSON.stringify(details)}`, ip);
 }
 
 /** @typedef {'idle'|'to_pickup'|'awaiting_pickup'|'to_destination'|'awaiting_delivery'|'returning_home'} DroneStatus */
@@ -179,6 +218,23 @@ setInterval(() => {
 
 const app = express();
 app.use(express.json());
+
+// Trace correlation + request logging (see moses-monitoring-skill.md).
+app.use((req, res, next) => {
+  const traceId = req.headers['x-trace-id'] || crypto.randomUUID();
+  const spanId = crypto.randomBytes(4).toString('hex');
+  const parentSpanId = req.headers['x-parent-span-id'] || undefined;
+  const startedAt = Date.now();
+
+  traceContext.run({ traceId, spanId, parentSpanId }, () => {
+    res.on('finish', () => {
+      const durationMs = Date.now() - startedAt;
+      const level = res.statusCode >= 500 ? LOG_LEVEL.ERROR : res.statusCode >= 400 ? LOG_LEVEL.WARN : LOG_LEVEL.INFO;
+      logEvent('REQUEST', { method: req.method, path: req.originalUrl, status: res.statusCode, durationMs }, level, req.ip);
+    });
+    next();
+  });
+});
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', fleetSize: FLEET_SIZE, speedKmh: SPEED_KMH }));
 
