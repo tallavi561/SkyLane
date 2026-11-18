@@ -5,6 +5,11 @@ set -e
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$root/logs"
 
+if [ -z "$MOSES_API_KEY" ]; then
+  echo "MOSES_API_KEY is not set - MoSes will reject this app's logs and heartbeats (401)."
+  echo "Create a key in MoSes (Settings -> Environments and keys), then: export MOSES_API_KEY=msk_..."
+fi
+
 for svc in drone-fleet-service pricing-service order-service; do
   if [ ! -d "$root/$svc/node_modules" ]; then
     echo "Installing dependencies in $svc..."

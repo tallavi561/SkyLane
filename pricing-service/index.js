@@ -9,7 +9,41 @@ const PRICE_PER_KM = Number(process.env.PRICE_PER_KM ?? 3);
 const PRICE_PER_MINUTE = Number(process.env.PRICE_PER_MINUTE ?? 1);
 
 // --- MoSes Monitor integration (see moses-monitoring-skill.md) ---
-const MOSES_BASE_URL = process.env.MOSES_BASE_URL || 'https://api-gateway-x17f.onrender.com';
+// MoSes runs locally (start-local.ps1); its api-gateway listens on 8085.
+const MOSES_BASE_URL = process.env.MOSES_BASE_URL || 'http://localhost:8085';
+// The gateway rejects logs and heartbeats without a key (401). Create one in MoSes under
+// Settings -> Environments and keys and set it as MOSES_API_KEY - never commit it.
+const MOSES_API_KEY = process.env.MOSES_API_KEY;
+if (!MOSES_API_KEY) {
+  console.warn('[moses] MOSES_API_KEY is not set - MoSes will reject every log and heartbeat (401).');
+}
+const MOSES_HEADERS = {
+  'Content-Type': 'application/json',
+  ...(MOSES_API_KEY ? { 'X-Api-Key': MOSES_API_KEY } : {}),
+};
+
+// fetch() only rejects on network errors; a 401/5xx resolves normally, so report it here.
+// Repeated identical failures are reported once, not on every request.
+let lastMosesProblem = null;
+function reportMosesResult(kind, promise) {
+  promise
+    .then(async (res) => {
+      if (res.ok) {
+        if (lastMosesProblem) console.log('[moses] sending works again');
+        lastMosesProblem = null;
+        return;
+      }
+      const body = await res.text().catch(() => '');
+      const problem = `${kind} rejected: HTTP ${res.status} ${body}`;
+      if (problem !== lastMosesProblem) console.error(`[moses] ${problem}`);
+      lastMosesProblem = problem;
+    })
+    .catch((err) => {
+      const problem = `${kind} failed: ${err.message} (${MOSES_BASE_URL})`;
+      if (problem !== lastMosesProblem) console.error(`[moses] ${problem}`);
+      lastMosesProblem = problem;
+    });
+}
 const MOSES_SERVICE_NAME = 'pricing-service';
 const MOSES_HEARTBEAT_MS = 20000;
 
@@ -38,23 +72,23 @@ function currentTrace() {
 }
 
 function sendMosesHeartbeat(status = 'UP') {
-  fetch(`${MOSES_BASE_URL}/api/process/heartbeat`, {
+  reportMosesResult('heartbeat', fetch(`${MOSES_BASE_URL}/api/process/heartbeat`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: MOSES_HEADERS,
     body: JSON.stringify({
       serviceName: MOSES_SERVICE_NAME,
       status,
       description: "Quotes a delivery's price from its distance and estimated flight time",
       ...sampleResourceUsage(),
     }),
-  }).catch((err) => console.error(`[moses] heartbeat failed: ${err.message}`));
+  }));
 }
 
 function sendMosesLog(logLevel, rawMessage, ip) {
   const { traceId, spanId } = currentTrace();
-  fetch(`${MOSES_BASE_URL}/api/logs`, {
+  reportMosesResult('log', fetch(`${MOSES_BASE_URL}/api/logs`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: MOSES_HEADERS,
     body: JSON.stringify({
       serviceName: MOSES_SERVICE_NAME,
       logLevel,
@@ -63,7 +97,7 @@ function sendMosesLog(logLevel, rawMessage, ip) {
       ...(traceId ? { traceId } : {}),
       ...(spanId ? { spanId } : {}),
     }),
-  }).catch(() => {});
+  }));
 }
 
 sendMosesHeartbeat();
